@@ -12,7 +12,7 @@ and using as starting template.
 -}
 
 import Css exposing (..)
-import Css.Elements exposing (..)
+import Html.Styled exposing (..)
 
 
 {-| Elm Minimalist, white text on black background

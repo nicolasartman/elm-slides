@@ -1,20 +1,19 @@
 module Slides
     exposing
-        ( app
+        ( Model
+        , Msg
         , Options
-        , slidesDefaultOptions
         , Slide
-        , md
-        , mdFragments
         , html
         , htmlFragments
-          -- TEA
-        , Msg(First, Last, Next, Prev)
-        , Model
         , init
+        , md
+        , mdFragments
+        , program
+        , slidesDefaultOptions
+        , subscriptions
         , update
         , view
-        , subscriptions
         )
 
 {-|
@@ -37,25 +36,22 @@ Normally used with [Navigation.program](http://package.elm-lang.org/packages/elm
 
 -}
 
-import AnimationFrame
 import Array exposing (Array)
-import Css exposing (px, pct)
+import Browser exposing (Key, UrlRequest)
+import Browser.Events
+import Css exposing (pct, px)
 import Ease
-import Slides.FragmentAnimation as FragmentAnimation
 import Html exposing (Html, div, section)
 import Html.Attributes exposing (class)
-import Keyboard
 import Markdown
-import Mouse
-import Navigation
+import Slides.FragmentAnimation as FragmentAnimation
 import Slides.SlideAnimation as SlideAnimation
 import Slides.Styles
 import SmoothAnimator
 import String
 import StringUnindent
 import Task
-import Time
-import Window
+import Url exposing (Url)
 
 
 -- types
@@ -72,16 +68,21 @@ type Slide
 
 
 {-| -}
-type Msg
-    = Noop
-    | First
+type Navigation
+    = First
     | Last
     | Next
     | Prev
+
+
+type Msg
+    = Noop
+    | OnNavigation Navigation
     | PauseAnimation
-    | AnimationTick Time.Time
+    | AnimationTick Float
     | WindowResizes Window.Size
-    | NewLocation Navigation.Location
+    | OnUrlChange Url
+    | OnUrlRequest UrlRequest
 
 
 
@@ -99,6 +100,7 @@ type alias PrivateModel =
     , isPaused : Bool
     , slideAnimation : SmoothAnimator.Model
     , fragmentAnimation : SmoothAnimator.Model
+    , key : Key
     }
 
 
@@ -117,7 +119,7 @@ type alias PrivateModel =
   - `easingFunction` &mdash; Any f : [0, 1] -> [0, 1]
     The standard ones are available in Elm's [easing-functions](http://package.elm-lang.org/packages/elm-community/easing-functions/1.0.1/).
 
-  - `animationDuration` &mdash; the `Time` duration of a slide or fragment animation.
+  - `animationDuration` &mdash; the duration in milliseconds of a slide or fragment animation.
 
   - `slidePixelSize` &mdash; `width` and `height` geometry of the slide area, in pixel.
     While the slide will be scaled to the window size, the internal coordinates of the slide will refer to these values.
@@ -130,7 +132,7 @@ type alias Options =
     , slideAnimator : SlideAnimation.Animator
     , fragmentAnimator : FragmentAnimation.Animator
     , easingFunction : Float -> Float
-    , animationDuration : Time.Time
+    , animationDuration : Float
     , slidePixelSize : { height : Int, width : Int }
     , keyCodesToMsg : List { msg : Msg, keyCodes : List Int }
     }
@@ -152,7 +154,7 @@ type alias Options =
         , easingFunction =
             Ease.inOutCubic
         , animationDuration =
-            500 * Time.millisecond
+            500
         , slidePixelSize =
             { height = 700
             , width = 960
@@ -200,7 +202,7 @@ slidesDefaultOptions =
     , easingFunction =
         Ease.inOutCubic
     , animationDuration =
-        500 * Time.millisecond
+        500
     , slidePixelSize =
         { height = 700
         , width = 960
@@ -322,7 +324,7 @@ mdFragments markdownFragments =
         htmlNodes =
             List.map (Markdown.toHtmlWith options [] << StringUnindent.unindent) markdownFragments
     in
-        htmlFragments htmlNodes
+    htmlFragments htmlNodes
 
 
 
@@ -396,7 +398,7 @@ slideAnimatorUpdate options oldParentModel childMsg =
             else
                 Navigation.newUrl <| modelToHashUrl newParentModel
     in
-        ( newParentModel, cmd )
+    ( newParentModel, cmd )
 
 
 fragmentAnimatorUpdate : Int -> Options -> PrivateModel -> SmoothAnimator.Msg -> ( PrivateModel, Cmd Msg )
@@ -408,7 +410,7 @@ fragmentAnimatorUpdate maximumPosition options oldParentModel msg =
         newParentModel =
             { oldParentModel | fragmentAnimation = newChildModel }
     in
-        noCmd newParentModel
+    noCmd newParentModel
 
 
 resetFragments : Float -> PrivateModel -> PrivateModel
@@ -420,7 +422,7 @@ resetFragments distance oldModel =
             else
                 List.length (slideByIndex oldModel oldModel.slideAnimation.targetPosition).fragments - 1
     in
-        { oldModel | fragmentAnimation = SmoothAnimator.init newPosition }
+    { oldModel | fragmentAnimation = SmoothAnimator.init newPosition }
 
 
 {-| -}
@@ -439,58 +441,58 @@ update options msg (Model oldModel) =
             else
                 fragmentAnimatorUpdate maximumPosition options oldModel msg
     in
-        Tuple.mapFirst Model <|
-            case msg of
-                Noop ->
+    Tuple.mapFirst Model <|
+        case msg of
+            Noop ->
+                noCmd oldModel
+
+            First ->
+                mixedUpdater True SmoothAnimator.SelectFirst
+
+            Last ->
+                mixedUpdater True SmoothAnimator.SelectLast
+
+            Prev ->
+                mixedUpdater (oldModel.fragmentAnimation.targetPosition - 1 < 0) SmoothAnimator.SelectPrev
+
+            Next ->
+                mixedUpdater (oldModel.fragmentAnimation.targetPosition + 1 > maximumPosition) SmoothAnimator.SelectNext
+
+            WindowResizes size ->
+                noCmd <| { oldModel | windowSize = size }
+
+            PauseAnimation ->
+                noCmd { oldModel | isPaused = not oldModel.isPaused }
+
+            AnimationTick deltaTime ->
+                if oldModel.isPaused then
                     noCmd oldModel
+                else
+                    let
+                        distance =
+                            slideDistance oldModel
 
-                First ->
-                    mixedUpdater True SmoothAnimator.SelectFirst
+                        ( m, cmd ) =
+                            mixedUpdater False (SmoothAnimator.AnimationTick deltaTime)
 
-                Last ->
-                    mixedUpdater True SmoothAnimator.SelectLast
+                        newModel =
+                            (if distance /= 0 then
+                                resetFragments distance
+                             else
+                                identity
+                            )
+                                m
+                    in
+                    ( newModel, cmd )
 
-                Prev ->
-                    mixedUpdater (oldModel.fragmentAnimation.targetPosition - 1 < 0) SmoothAnimator.SelectPrev
+            NewLocation location ->
+                case locationToSlideIndex location of
+                    -- User entered an url we can't parse as index
+                    Nothing ->
+                        ( oldModel, Navigation.modifyUrl <| modelToHashUrl oldModel )
 
-                Next ->
-                    mixedUpdater (oldModel.fragmentAnimation.targetPosition + 1 > maximumPosition) SmoothAnimator.SelectNext
-
-                WindowResizes size ->
-                    noCmd <| { oldModel | windowSize = size }
-
-                PauseAnimation ->
-                    noCmd { oldModel | isPaused = not oldModel.isPaused }
-
-                AnimationTick deltaTime ->
-                    if oldModel.isPaused then
-                        noCmd oldModel
-                    else
-                        let
-                            distance =
-                                slideDistance oldModel
-
-                            ( m, cmd ) =
-                                mixedUpdater False (SmoothAnimator.AnimationTick deltaTime)
-
-                            newModel =
-                                (if distance /= 0 then
-                                    resetFragments distance
-                                 else
-                                    identity
-                                )
-                                    m
-                        in
-                            ( newModel, cmd )
-
-                NewLocation location ->
-                    case locationToSlideIndex location of
-                        -- User entered an url we can't parse as index
-                        Nothing ->
-                            ( oldModel, Navigation.modifyUrl <| modelToHashUrl oldModel )
-
-                        Just index ->
-                            slideAnimatorUpdate options oldModel <| SmoothAnimator.SelectExact index
+                    Just index ->
+                        slideAnimatorUpdate options oldModel <| SmoothAnimator.SelectExact index
 
 
 
@@ -498,8 +500,8 @@ update options msg (Model oldModel) =
 
 
 {-| -}
-init : Options -> List Slide -> Navigation.Location -> ( Model, Cmd Msg )
-init options wrappedSlides location =
+init : Options -> List Slide -> () -> Url -> Key -> ( Model, Cmd Msg )
+init options wrappedSlides flags url key =
     let
         unwrapSlide (Slide privateSlide) =
             privateSlide
@@ -510,10 +512,11 @@ init options wrappedSlides location =
             , isPaused = False
             , slideAnimation = SmoothAnimator.init 0
             , fragmentAnimation = SmoothAnimator.init 0
+            , key = key
             }
 
         ( Model model, urlCmd ) =
-            update options (NewLocation location) (Model model0)
+            update options (OnUrlChange url) (Model model0)
 
         slidePosition0 =
             model.slideAnimation.targetPosition
@@ -524,7 +527,7 @@ init options wrappedSlides location =
         cmdWindow =
             Task.perform WindowResizes Window.size
     in
-        ( Model { model | slideAnimation = slideAnimation }, Cmd.batch [ cmdWindow, urlCmd ] )
+    ( Model { model | slideAnimation = slideAnimation }, Cmd.batch [ cmdWindow, urlCmd ] )
 
 
 
@@ -546,7 +549,7 @@ fragmentsByPosition options model index fragmentPosition =
             slideByIndex model index
 
         completionByIndex index =
-            (clamp 0 1 <| 1 + fragmentPosition - toFloat index)
+            clamp 0 1 <| 1 + fragmentPosition - toFloat index
 
         styleFrag index frag =
             div
@@ -559,7 +562,7 @@ fragmentsByPosition options model index fragmentPosition =
         styledFragments =
             List.indexedMap styleFrag slide.fragments
     in
-        styledFragments
+    styledFragments
 
 
 slideViewMotion options model =
@@ -605,9 +608,9 @@ slideViewMotion options model =
         fragByPos =
             fragmentsByPosition options model
     in
-        [ slideSection (slideAnimator <| SlideAnimation.Moving smallerDirection SlideAnimation.EarlierSlide completion) (fragByPos smallerIndex 9999)
-        , slideSection (slideAnimator <| SlideAnimation.Moving largerDirection SlideAnimation.LaterSlide completion) (fragByPos largerIndex 0)
-        ]
+    [ slideSection (slideAnimator <| SlideAnimation.Moving smallerDirection SlideAnimation.EarlierSlide completion) (fragByPos smallerIndex 9999)
+    , slideSection (slideAnimator <| SlideAnimation.Moving largerDirection SlideAnimation.LaterSlide completion) (fragByPos largerIndex 0)
+    ]
 
 
 slideViewStill options model =
@@ -633,27 +636,27 @@ view options (Model model) =
                 |> Css.compile
                 |> .css
     in
-        div
+    div
+        []
+        [ Html.node "style"
             []
-            [ Html.node "style"
-                []
-                [ Html.text css ]
-            , div
-                [ class "slides"
-                , (Html.Attributes.style << Css.asPairs)
-                    [ Css.width (px <| toFloat options.slidePixelSize.width)
-                    , Css.height (px <| toFloat options.slidePixelSize.height)
-                    , Css.transforms [ Css.translate2 (pct -50) (pct -50), Css.scale (scale options model) ]
-                    , Css.left (pct 50)
-                    , Css.top (pct 50)
-                    , Css.bottom Css.auto
-                    , Css.right Css.auto
-                    , Css.position Css.absolute
-                    , Css.overflow Css.hidden
-                    ]
+            [ Html.text css ]
+        , div
+            [ class "slides"
+            , (Html.Attributes.style << Css.asPairs)
+                [ Css.width (px <| toFloat options.slidePixelSize.width)
+                , Css.height (px <| toFloat options.slidePixelSize.height)
+                , Css.transforms [ Css.translate2 (pct -50) (pct -50), Css.scale (scale options model) ]
+                , Css.left (pct 50)
+                , Css.top (pct 50)
+                , Css.bottom Css.auto
+                , Css.right Css.auto
+                , Css.position Css.absolute
+                , Css.overflow Css.hidden
                 ]
-                (slideView options model)
             ]
+            (slideView options model)
+        ]
 
 
 
@@ -713,10 +716,10 @@ mouseClickDispatcher options model position =
         isAbove =
             toFloat position.y < y (toFloat position.x)
     in
-        if isAbove then
-            Prev
-        else
-            Next
+    if isAbove then
+        Prev
+    else
+        Next
 
 
 
@@ -727,12 +730,26 @@ mouseClickDispatcher options model position =
 subscriptions : Options -> Model -> Sub Msg
 subscriptions options (Model model) =
     Sub.batch
-        -- TODO: switch to Keyboard.presses once https://github.com/elm-lang/keyboard/issues/3 is fixed
-        [ Keyboard.ups (keyPressDispatcher options.keyCodesToMsg)
+        [ Browser.Events.onKeyUp (keyboardDecoder config.keyCodesToMsg)
         , Mouse.clicks <| mouseClickDispatcher options model
         , Window.resizes WindowResizes
-        , AnimationFrame.diffs AnimationTick
+        , Browser.Events.onAnimationFrameDelta AnimationTick
         ]
+
+
+keyboardDecoder : (String -> msg) -> Decoder msg
+keyboardDecoder msg =
+    Json.Decode.string
+        |> Json.Decode.field "key"
+        |> Json.Decode.map (singleToUpper >> msg)
+
+
+singleToUpper : String -> String
+singleToUpper s =
+    if String.length s /= 1 then
+        s
+    else
+        String.toUpper s
 
 
 
@@ -741,7 +758,7 @@ subscriptions options (Model model) =
 
 {-| Does all the wiring for you, returning a `Program` ready to run.
 
-    main = Slides.app
+    main = Slides.program
         Slides.slidesDefaultOptions
         [ slide1
         , slide2
@@ -749,12 +766,13 @@ subscriptions options (Model model) =
         ]
 
 -}
-app : Options -> List Slide -> Program Never Model Msg
-app options slides =
-    Navigation.program
-        NewLocation
+program : Options -> List Slide -> Program Never Model Msg
+program options slides =
+    Browser.application
         { init = init options slides
         , update = update options
         , view = view options
         , subscriptions = subscriptions options
+        , onUrlRequest = OnUrlRequest
+        , onUrlChange = OnUrlChange
         }
